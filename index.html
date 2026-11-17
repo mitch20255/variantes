@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Variantes RunComfy</title>
+<style>
+/* Une colonne, pensée pour le pouce : réglages en haut, gros bouton, grille d'images en dessous. */
+:root{
+  --bg:#f3f4f8; --card:#ffffff; --fg:#171a26; --muted:#5c6378; --line:#d6d9e4;
+  --accent:#3b4fd8; --accent-fg:#ffffff; --bad:#b3261e; --ok:#1c7a4a;
+  --font:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#11131b; --card:#1b1e2a; --fg:#eceef6; --muted:#9aa1b8; --line:#2f3447;
+  --accent:#8b9bff; --accent-fg:#10121c; --bad:#ff8a80; --ok:#6fd6a0; color-scheme:dark;
+}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 var(--font);
+  padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 48px max(16px,env(safe-area-inset-left))}
+main{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+h1{font-size:1.35rem;margin:4px 0 0}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px}
+label{font-size:.85rem;color:var(--muted);display:flex;flex-direction:column;gap:6px}
+input,select,textarea,button{font:inherit;color:inherit}
+input,select,textarea{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;width:100%}
+textarea{min-height:150px;resize:vertical}
+button{border:0;border-radius:10px;padding:14px 16px;background:var(--accent);color:var(--accent-fg);font-weight:600;min-height:48px}
+button.second{background:transparent;color:var(--fg);border:1px solid var(--line)}
+button:disabled{opacity:.5}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.row>*{flex:1 1 130px;min-width:0}
+.check{flex-direction:row;align-items:center;gap:10px;color:var(--fg);font-size:1rem}
+.check input{width:22px;height:22px;flex:none}
+.msg{font-size:.92rem;color:var(--muted);margin:0;overflow-wrap:anywhere}
+.msg.bad{color:var(--bad)} .msg.ok{color:var(--ok)}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+figure{margin:0;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;min-width:0}
+figure .ph{aspect-ratio:1;display:grid;place-items:center;color:var(--muted);font-size:.85rem;text-align:center;padding:8px}
+figure img{display:block;width:100%;height:auto}
+figcaption{font-size:.8rem;padding:8px;color:var(--muted);overflow-wrap:anywhere}
+figcaption b{color:var(--fg);font-weight:600}
+</style>
+</head>
+<body>
+<main>
+  <h1>Variantes RunComfy</h1>
+
+  <section id="s-key">
+    <label for="token">Clé d'API RunComfy (elle reste dans ce téléphone)
+      <input id="token" type="password" autocomplete="off" placeholder="Colle ta clé ici">
+    </label>
+    <button id="connect">Connecter</button>
+    <p id="keymsg" class="msg">La clé se trouve sur ta page de profil RunComfy.</p>
+  </section>
+
+  <section id="s-gen" hidden>
+    <label for="dep">Workflow déployé
+      <select id="dep"></select>
+    </label>
+    <label for="prompt">Prompt. Mets les choix entre accolades : {petit|moyen|grand}
+      <textarea id="prompt" spellcheck="false"></textarea>
+    </label>
+    <div class="row">
+      <label for="count">Nombre d'images
+        <input id="count" type="number" inputmode="numeric" min="1" max="60" value="8">
+      </label>
+      <label for="seed">Seed
+        <input id="seed" type="number" inputmode="numeric" value="12345">
+      </label>
+    </div>
+    <label class="check" for="fixed"><input id="fixed" type="checkbox" checked> Même seed pour toutes (pour comparer)</label>
+    <p id="info" class="msg"></p>
+    <div class="row">
+      <button id="go">Générer</button>
+      <button id="stop" class="second" disabled>Arrêter</button>
+    </div>
+    <p id="genmsg" class="msg">La première image peut prendre quelques minutes, le temps que la machine démarre.</p>
+  </section>
+
+  <div id="grid"></div>
+</main>
+
+<script>
+"use strict";
+const API = "https://api.runcomfy.net/prod/v2";
+const $ = id => document.getElementById(id);
+const store = {
+  get(k){ try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+  set(k,v){ try { localStorage.setItem(k,v); } catch {} }
+};
+let deployments = [], target = null, running = false, jobs = [];
+
+async function api(path, opts = {}) {
+  const r = await fetch(path.startsWith("http") ? path : API + path, {
+    ...opts,
+    headers: { "Authorization": "Bearer " + $("token").value.trim(), "Content-Type": "application/json" }
+  });
+  let body = null;
+  try { body = await r.json(); } catch {}
+  if (!r.ok) throw new Error((body && (body.error_message || body.message || body.detail)) || ("Erreur " + r.status));
+  return body;
+}
+
+/* Trouve, dans le workflow enregistré, la case du prompt positif et celle du seed. */
+function findTargets(wf) {
+  const isLink = v => Array.isArray(v) && v.length === 2 && typeof v[0] === "string";
+  const out = { promptNode: null, seedNode: null, seedKey: null, text: "" };
+  const follow = (link, depth = 0) => {
+    if (!isLink(link) || depth > 6) return null;
+    const n = wf[link[0]];
+    if (!n || !n.inputs) return null;
+    if (typeof n.inputs.text === "string") return link[0];
+    for (const k of ["positive", "conditioning", "conditioning_1", "conditioning_to"]) {
+      const f = follow(n.inputs[k], depth + 1);
+      if (f) return f;
+    }
+    return null;
+  };
+  for (const [id, n] of Object.entries(wf || {})) {
+    const i = (n && n.inputs) || {};
+    if (!out.seedNode) for (const k of ["seed", "noise_seed"]) {
+      if (typeof i[k] === "number") { out.seedNode = id; out.seedKey = k; }
+    }
+    if (!out.promptNode && i.positive) out.promptNode = follow(i.positive);
+  }
+  if (!out.promptNode) {            // secours : premier nœud de texte
+    const e = Object.entries(wf || {}).find(([, n]) => n && n.inputs && typeof n.inputs.text === "string");
+    if (e) out.promptNode = e[0];
+  }
+  if (out.promptNode) out.text = wf[out.promptNode].inputs.text;
+  return out;
+}
+
+/* "{a|b} x {c|d}" -> toutes les combinaisons, avec les mots choisis. */
+function expand(tpl) {
+  const parts = tpl.split(/(\{[^{}]*\|[^{}]*\})/);
+  let combos = [{ text: "", picks: [] }];
+  for (const p of parts) {
+    if (/^\{[^{}]*\|[^{}]*\}$/.test(p)) {
+      const opts = p.slice(1, -1).split("|").map(s => s.trim());
+      const next = [];
+      for (const c of combos) for (const o of opts) {
+        if (next.length >= 5000) break;
+        next.push({ text: c.text + o, picks: c.picks.concat(o) });
+      }
+      combos = next;
+    } else combos = combos.map(c => ({ text: c.text + p, picks: c.picks }));
+  }
+  return combos;
+}
+function plan() {
+  const combos = expand($("prompt").value);
+  const n = Math.max(1, Math.min(60, parseInt($("count").value, 10) || 1));
+  if (combos.length === 1) return Array.from({ length: n }, () => combos[0]);
+  if (combos.length <= n) return combos;
+  const a = combos.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a.slice(0, n);
+}
+function updateInfo() {
+  const c = expand($("prompt").value).length;
+  const n = plan().length;
+  $("info").textContent = c > 1
+    ? c + " combinaisons possibles, " + n + " image" + (n > 1 ? "s" : "") + " seront générées."
+    : "Aucun choix entre accolades : " + n + " image" + (n > 1 ? "s" : "") + " avec le même prompt.";
+}
+
+function pickDeployment() {
+  const d = deployments.find(x => x.id === $("dep").value);
+  target = d ? findTargets(d.payload && d.payload.workflow_api_json) : null;
+  const saved = store.get("prompt:" + (d ? d.id : ""));
+  $("prompt").value = saved || (target ? target.text : "");
+  $("go").disabled = !target || !target.promptNode;
+  $("genmsg").className = "msg" + ($("go").disabled ? " bad" : "");
+  if ($("go").disabled) $("genmsg").textContent = "Je ne trouve pas la case du prompt dans ce workflow.";
+  updateInfo();
+}
+
+async function connect() {
+  const m = $("keymsg");
+  m.className = "msg"; m.textContent = "Connexion…";
+  $("connect").disabled = true;
+  try {
+    const list = await api("/deployments?includes=payload");
+    deployments = (list || []).filter(d => d.is_enabled !== false);
+    if (!deployments.length) throw new Error("Aucun workflow déployé dans ce compte. Dans RunComfy : Deployments, puis « Deploy workflow as API ».");
+    store.set("token", $("token").value.trim());
+    $("dep").innerHTML = "";
+    for (const d of deployments) {
+      const o = document.createElement("option");
+      o.value = d.id; o.textContent = d.name || d.id;
+      $("dep").appendChild(o);
+    }
+    const last = store.get("dep");
+    if (deployments.some(d => d.id === last)) $("dep").value = last;
+    m.className = "msg ok"; m.textContent = "Connecté.";
+    $("s-gen").hidden = false;
+    pickDeployment();
+  } catch (e) {
+    m.className = "msg bad";
+    m.textContent = e.message === "Invalid token" ? "Clé refusée par RunComfy. Vérifie-la." : e.message;
+  } finally { $("connect").disabled = false; }
+}
+
+function card(v, i) {
+  const f = document.createElement("figure");
+  const ph = document.createElement("div"); ph.className = "ph"; ph.textContent = "En attente";
+  const cap = document.createElement("figcaption");
+  const b = document.createElement("b"); b.textContent = v.picks.length ? v.picks.join(" · ") : "Image " + (i + 1);
+  cap.appendChild(b);
+  f.append(ph, cap);
+  $("grid").appendChild(f);
+  return { fig: f, ph };
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function runJob(job) {
+  const dep = $("dep").value;
+  const overrides = { [target.promptNode]: { inputs: { text: job.v.text } } };
+  if (target.seedNode) overrides[target.seedNode] = { inputs: { [target.seedKey]: job.seed } };
+  try {
+    const sub = await api("/deployments/" + dep + "/inference", { method: "POST", body: JSON.stringify({ overrides }) });
+    job.id = sub.request_id;
+    for (;;) {
+      if (!running) return;
+      const st = await api("/deployments/" + dep + "/requests/" + job.id + "/status");
+      if (st.status === "in_queue") job.ph.textContent = "En file" + (st.queue_position ? " (" + st.queue_position + ")" : "");
+      else if (st.status === "in_progress") job.ph.textContent = "En cours…";
+      else break;
+      await sleep(4000);
+    }
+    const res = await api("/deployments/" + dep + "/requests/" + job.id + "/result");
+    const urls = [];
+    for (const o of Object.values(res.outputs || {})) for (const im of (o.images || [])) if (im.url) urls.push(im.url);
+    if (res.status !== "succeeded" || !urls.length) {
+      throw new Error((res.error && (res.error.message || JSON.stringify(res.error))) || "Pas d'image (" + res.status + ")");
+    }
+    job.ph.remove();
+    for (const u of urls) {
+      const a = document.createElement("a"); a.href = u; a.target = "_blank"; a.rel = "noopener";
+      const img = document.createElement("img"); img.src = u; img.alt = job.v.picks.join(", ") || "Image générée"; img.loading = "lazy";
+      a.appendChild(img); job.fig.prepend(a);
+    }
+    job.done = true;
+  } catch (e) {
+    job.ph.textContent = "Échec : " + e.message; job.ph.style.color = "var(--bad)"; job.done = true; job.failed = true;
+  }
+}
+
+async function generate() {
+  if (running || !target) return;
+  const variants = plan();
+  const base = parseInt($("seed").value, 10) || 0;
+  store.set("prompt:" + $("dep").value, $("prompt").value);
+  store.set("dep", $("dep").value);
+  running = true; $("go").disabled = true; $("stop").disabled = false;
+  $("grid").innerHTML = "";
+  $("genmsg").className = "msg"; $("genmsg").textContent = "Envoi de " + variants.length + " demande(s)…";
+  jobs = variants.map((v, i) => ({ v, seed: $("fixed").checked ? base : base + i, ...card(v, i) }));
+  await Promise.all(jobs.map(runJob));
+  const bad = jobs.filter(j => j.failed).length;
+  if (running) {
+    $("genmsg").className = "msg " + (bad ? "bad" : "ok");
+    $("genmsg").textContent = bad ? bad + " image(s) en échec sur " + jobs.length + "." : "Terminé : " + jobs.length + " image(s). Elles restent 7 jours chez RunComfy.";
+  }
+  running = false; $("go").disabled = false; $("stop").disabled = true;
+}
+
+async function stop() {
+  if (!running) return;
+  running = false;
+  $("genmsg").className = "msg"; $("genmsg").textContent = "Arrêté. Les demandes en attente sont annulées.";
+  const dep = $("dep").value;
+  for (const j of jobs) if (j.id && !j.done) {
+    j.ph.textContent = "Annulée";
+    api("/deployments/" + dep + "/requests/" + j.id + "/cancel", { method: "POST" }).catch(() => {});
+  }
+}
+
+$("connect").addEventListener("click", connect);
+$("dep").addEventListener("change", pickDeployment);
+$("prompt").addEventListener("input", updateInfo);
+$("count").addEventListener("input", updateInfo);
+$("go").addEventListener("click", generate);
+$("stop").addEventListener("click", stop);
+$("token").value = store.get("token");
+if ($("token").value) connect();
+</script>
+</body>
+</html>
