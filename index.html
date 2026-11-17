@@ -217,6 +217,22 @@ function card(v, i) {
   return { fig: f, ph };
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const dur = ms => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + " min " + String(s % 60).padStart(2, "0") + " s"; };
+let ticker = null, started = 0;
+/* Chaque seconde : montre que l'app est vivante et où en est chaque image. */
+function tick() {
+  if (!running) return;
+  const now = Date.now();
+  let done = 0;
+  for (const j of jobs) {
+    if (j.done) { done++; continue; }
+    if (j.label) j.ph.textContent = j.label + " · " + dur(now - started);
+  }
+  const m = $("genmsg");
+  m.className = "msg";
+  m.textContent = done + " sur " + jobs.length + " terminée(s) · " + dur(now - started) +
+    (done === 0 ? ". La machine démarre : compte 3 à 10 minutes avant la première image, ensuite ça va vite." : ".");
+}
 
 async function runJob(job) {
   const dep = $("dep").value;
@@ -228,9 +244,10 @@ async function runJob(job) {
     for (;;) {
       if (!running) return;
       const st = await api("/deployments/" + dep + "/requests/" + job.id + "/status");
-      if (st.status === "in_queue") job.ph.textContent = "En file" + (st.queue_position ? " (" + st.queue_position + ")" : "");
-      else if (st.status === "in_progress") job.ph.textContent = "En cours…";
+      if (st.status === "in_queue") job.label = "En file" + (st.queue_position ? " (position " + st.queue_position + ")" : "");
+      else if (st.status === "in_progress") job.label = "En cours";
       else break;
+      job.checked = Date.now();
       await sleep(4000);
     }
     const res = await api("/deployments/" + dep + "/requests/" + job.id + "/result");
@@ -260,8 +277,11 @@ async function generate() {
   running = true; $("go").disabled = true; $("stop").disabled = false;
   $("grid").innerHTML = "";
   $("genmsg").className = "msg"; $("genmsg").textContent = "Envoi de " + variants.length + " demande(s)…";
-  jobs = variants.map((v, i) => ({ v, seed: $("fixed").checked ? base : base + i, ...card(v, i) }));
+  jobs = variants.map((v, i) => ({ v, seed: $("fixed").checked ? base : base + i, label: "Envoi", ...card(v, i) }));
+  started = Date.now();
+  clearInterval(ticker); ticker = setInterval(tick, 1000);
   await Promise.all(jobs.map(runJob));
+  clearInterval(ticker);
   const bad = jobs.filter(j => j.failed).length;
   if (running) {
     $("genmsg").className = "msg " + (bad ? "bad" : "ok");
@@ -272,7 +292,7 @@ async function generate() {
 
 async function stop() {
   if (!running) return;
-  running = false;
+  running = false; clearInterval(ticker);
   $("genmsg").className = "msg"; $("genmsg").textContent = "Arrêté. Les demandes en attente sont annulées.";
   const dep = $("dep").value;
   for (const j of jobs) if (j.id && !j.done) {
