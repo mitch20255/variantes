@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex">
 <title>Variantes RunComfy</title>
 <style>
-/* Une colonne, pensée pour le pouce : réglages en haut, gros bouton, grille d'images en dessous. */
+/* Une colonne, pensée pour le pouce : réglages en haut, gros bouton, grille de résultats en dessous. */
 :root{
   --bg:#f3f4f8; --card:#ffffff; --fg:#171a26; --muted:#5c6378; --line:#d6d9e4;
   --accent:#3b4fd8; --accent-fg:#ffffff; --bad:#b3261e; --ok:#1c7a4a;
@@ -26,7 +26,7 @@ section{background:var(--card);border:1px solid var(--line);border-radius:12px;p
 label{font-size:.85rem;color:var(--muted);display:flex;flex-direction:column;gap:6px}
 input,select,textarea,button{font:inherit;color:inherit}
 input,select,textarea{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;width:100%}
-textarea{min-height:150px;resize:vertical}
+textarea{min-height:170px;resize:vertical}
 button{border:0;border-radius:10px;padding:14px 16px;background:var(--accent);color:var(--accent-fg);font-weight:600;min-height:48px}
 button.second{background:transparent;color:var(--fg);border:1px solid var(--line)}
 button:disabled{opacity:.5}
@@ -37,10 +37,13 @@ button:disabled{opacity:.5}
 .check input{width:22px;height:22px;flex:none}
 .msg{font-size:.92rem;color:var(--muted);margin:0;overflow-wrap:anywhere}
 .msg.bad{color:var(--bad)} .msg.ok{color:var(--ok)}
+.pick{display:flex;gap:12px;align-items:center}
+.pick img{width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid var(--line);flex:none}
 #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+#grid.video{grid-template-columns:1fr}
 figure{margin:0;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;min-width:0}
 figure .ph{aspect-ratio:1;display:grid;place-items:center;color:var(--muted);font-size:.85rem;text-align:center;padding:8px}
-figure img{display:block;width:100%;height:auto}
+figure img,figure video{display:block;width:100%;height:auto;background:#000}
 figcaption{font-size:.8rem;padding:8px;color:var(--muted);overflow-wrap:anywhere}
 figcaption b{color:var(--fg);font-weight:600}
 </style>
@@ -61,11 +64,20 @@ figcaption b{color:var(--fg);font-weight:600}
     <label for="dep">Workflow déployé
       <select id="dep"></select>
     </label>
-    <label for="prompt">Prompt. Mets les choix entre accolades : {petit|moyen|grand}
+    <p id="kind" class="msg"></p>
+
+    <div id="s-img" hidden>
+      <label for="img">Image de départ
+        <input id="img" type="file" accept="image/*">
+      </label>
+      <div class="pick" id="pick" hidden><img id="thumb" alt="Image de départ choisie"><p class="msg" id="imgmsg"></p></div>
+    </div>
+
+    <label for="prompt" id="promptlabel">Prompt
       <textarea id="prompt" spellcheck="false"></textarea>
     </label>
     <div class="row">
-      <label for="count">Nombre d'images
+      <label for="count">Nombre
         <input id="count" type="number" inputmode="numeric" min="1" max="60" value="8">
       </label>
       <label for="seed">Seed
@@ -92,7 +104,7 @@ const store = {
   get(k){ try { return localStorage.getItem(k) || ""; } catch { return ""; } },
   set(k,v){ try { localStorage.setItem(k,v); } catch {} }
 };
-let deployments = [], target = null, running = false, jobs = [];
+let deployments = [], target = null, running = false, jobs = [], imageData = "";
 
 async function api(path, opts = {}) {
   const r = await fetch(path.startsWith("http") ? path : API + path, {
@@ -105,56 +117,90 @@ async function api(path, opts = {}) {
   return body;
 }
 
-/* Trouve, dans le workflow enregistré, la case du prompt positif et celle du seed. */
+/* Analyse le workflow enregistré : où est le prompt, où sont les seeds, y a-t-il une image de départ. */
+const isLink = v => Array.isArray(v) && v.length === 2 && typeof v[0] === "string";
 function findTargets(wf) {
-  const isLink = v => Array.isArray(v) && v.length === 2 && typeof v[0] === "string";
-  const out = { promptNode: null, seedNode: null, seedKey: null, text: "" };
-  const follow = (link, depth = 0) => {
-    if (!isLink(link) || depth > 6) return null;
-    const n = wf[link[0]];
+  wf = wf || {};
+  const out = { promptNode: null, promptKey: null, text: "", wildcard: false, wildcardSeed: null, seeds: [], imageNode: null };
+  const findText = (link, depth) => {
+    if (!isLink(link) || depth > 8) return null;
+    const id = link[0], n = wf[id];
     if (!n || !n.inputs) return null;
-    if (typeof n.inputs.text === "string") return link[0];
-    for (const k of ["positive", "conditioning", "conditioning_1", "conditioning_to"]) {
-      const f = follow(n.inputs[k], depth + 1);
+    for (const k of ["wildcard_text", "text", "prompt", "string", "value"])
+      if (typeof n.inputs[k] === "string") return { id, key: k };
+    for (const k of ["text", "prompt", "string", "positive", "conditioning", "conditioning_1", "conditioning_to", "cond"]) {
+      const f = findText(n.inputs[k], depth + 1);
       if (f) return f;
     }
     return null;
   };
-  for (const [id, n] of Object.entries(wf || {})) {
+  for (const [id, n] of Object.entries(wf)) {
     const i = (n && n.inputs) || {};
-    if (!out.seedNode) for (const k of ["seed", "noise_seed"]) {
-      if (typeof i[k] === "number") { out.seedNode = id; out.seedKey = k; }
+    if (!out.promptNode && isLink(i.positive)) {
+      const f = findText(i.positive, 0);
+      if (f) { out.promptNode = f.id; out.promptKey = f.key; }
     }
-    if (!out.promptNode && i.positive) out.promptNode = follow(i.positive);
+    if (!out.imageNode && n && n.class_type === "LoadImage" && typeof i.image === "string") out.imageNode = id;
   }
   if (!out.promptNode) {            // secours : premier nœud de texte
-    const e = Object.entries(wf || {}).find(([, n]) => n && n.inputs && typeof n.inputs.text === "string");
-    if (e) out.promptNode = e[0];
+    const e = Object.entries(wf).find(([, n]) => n && n.inputs && (typeof n.inputs.wildcard_text === "string" || typeof n.inputs.text === "string"));
+    if (e) { out.promptNode = e[0]; out.promptKey = typeof e[1].inputs.wildcard_text === "string" ? "wildcard_text" : "text"; }
   }
-  if (out.promptNode) out.text = wf[out.promptNode].inputs.text;
+  if (out.promptNode) {
+    out.text = wf[out.promptNode].inputs[out.promptKey];
+    out.wildcard = out.promptKey === "wildcard_text";
+  }
+  for (const [id, n] of Object.entries(wf)) {
+    const i = (n && n.inputs) || {};
+    for (const k of ["seed", "noise_seed"]) if (typeof i[k] === "number") {
+      if (out.wildcard && id === out.promptNode) out.wildcardSeed = k;
+      else out.seeds.push([id, k]);
+    }
+  }
   return out;
 }
 
-/* "{a|b} x {c|d}" -> toutes les combinaisons, avec les mots choisis. */
-function expand(tpl) {
+/* Choix entre accolades, avec des poids facultatifs : {6::a|3::b|c}. */
+const BRACES = /\{([^{}]*\|[^{}]*)\}/g;
+function parseOpts(body) {
+  return body.split("|").map(o => {
+    const m = o.match(/^\s*(\d+(?:\.\d+)?)::/);
+    return { w: m ? parseFloat(m[1]) : 1, t: (m ? o.slice(m[0].length) : o).trim() };
+  });
+}
+function hasWeights(tpl) { return /\{[^{}]*\d::/.test(tpl); }
+function expandAll(tpl) {
   const parts = tpl.split(/(\{[^{}]*\|[^{}]*\})/);
   let combos = [{ text: "", picks: [] }];
   for (const p of parts) {
     if (/^\{[^{}]*\|[^{}]*\}$/.test(p)) {
-      const opts = p.slice(1, -1).split("|").map(s => s.trim());
+      const opts = parseOpts(p.slice(1, -1));
       const next = [];
       for (const c of combos) for (const o of opts) {
         if (next.length >= 5000) break;
-        next.push({ text: c.text + o, picks: c.picks.concat(o) });
+        next.push({ text: c.text + o.t, picks: c.picks.concat(o.t) });
       }
       combos = next;
     } else combos = combos.map(c => ({ text: c.text + p, picks: c.picks }));
   }
   return combos;
 }
+function sampleOne(tpl) {
+  const picks = [];
+  const text = tpl.replace(BRACES, (_, body) => {
+    const opts = parseOpts(body), total = opts.reduce((s, o) => s + o.w, 0);
+    let r = Math.random() * total;
+    for (const o of opts) { if ((r -= o.w) < 0) { picks.push(o.t); return o.t; } }
+    const last = opts[opts.length - 1]; picks.push(last.t); return last.t;
+  });
+  return { text, picks };
+}
 function plan() {
-  const combos = expand($("prompt").value);
+  const tpl = $("prompt").value;
   const n = Math.max(1, Math.min(60, parseInt($("count").value, 10) || 1));
+  if (target && target.wildcard) return Array.from({ length: n }, () => ({ text: tpl, picks: [] }));
+  if (hasWeights(tpl)) return Array.from({ length: n }, () => sampleOne(tpl));
+  const combos = expandAll(tpl);
   if (combos.length === 1) return Array.from({ length: n }, () => combos[0]);
   if (combos.length <= n) return combos;
   const a = combos.slice();
@@ -162,11 +208,18 @@ function plan() {
   return a.slice(0, n);
 }
 function updateInfo() {
-  const c = expand($("prompt").value).length;
-  const n = plan().length;
-  $("info").textContent = c > 1
-    ? c + " combinaisons possibles, " + n + " image" + (n > 1 ? "s" : "") + " seront générées."
-    : "Aucun choix entre accolades : " + n + " image" + (n > 1 ? "s" : "") + " avec le même prompt.";
+  const n = plan().length, s = n > 1 ? "s" : "";
+  const tpl = $("prompt").value;
+  let t;
+  if (target && target.wildcard) t = n + " envoi" + s + ". Chaque fois, le serveur tire ses propres choix dans tes __listes__ et tes {accolades}.";
+  else if (hasWeights(tpl)) t = n + " envoi" + s + ", choix tirés au hasard selon tes nombres 6::, 3::, 1::.";
+  else {
+    const c = expandAll(tpl).length;
+    t = c > 1 ? c + " combinaisons possibles, " + n + " envoi" + s + "." : "Aucun choix entre accolades : " + n + " envoi" + s + " avec le même prompt.";
+  }
+  if (target && target.imageNode && !imageData) t += " Choisis d'abord une image de départ.";
+  $("info").textContent = t;
+  $("go").disabled = running || !target || !target.promptNode || (target.imageNode && !imageData);
 }
 
 function pickDeployment() {
@@ -174,9 +227,19 @@ function pickDeployment() {
   target = d ? findTargets(d.payload && d.payload.workflow_api_json) : null;
   const saved = store.get("prompt:" + (d ? d.id : ""));
   $("prompt").value = saved || (target ? target.text : "");
-  $("go").disabled = !target || !target.promptNode;
-  $("genmsg").className = "msg" + ($("go").disabled ? " bad" : "");
-  if ($("go").disabled) $("genmsg").textContent = "Je ne trouve pas la case du prompt dans ce workflow.";
+  const k = $("kind");
+  if (!target || !target.promptNode) {
+    k.className = "msg bad"; k.textContent = "Je ne trouve pas la case du prompt dans ce workflow.";
+  } else {
+    k.className = "msg";
+    k.textContent = (target.imageNode ? "Workflow avec image de départ (vidéo ou retouche). " : "") +
+      (target.wildcard ? "Prompt de la boîte verte (listes)." : "Prompt normal.");
+  }
+  $("promptlabel").firstChild.textContent = target && target.wildcard
+    ? "Prompt avec __listes__ (le serveur fait les tirages)" : "Prompt. Mets les choix entre accolades : {petit|moyen|grand}";
+  $("s-img").hidden = !(target && target.imageNode);
+  if (target && target.imageNode && !store.get("count:" + d.id)) $("count").value = 1;
+  else if (d && store.get("count:" + d.id)) $("count").value = store.get("count:" + d.id);
   updateInfo();
 }
 
@@ -206,20 +269,31 @@ async function connect() {
   } finally { $("connect").disabled = false; }
 }
 
-function card(v, i) {
-  const f = document.createElement("figure");
-  const ph = document.createElement("div"); ph.className = "ph"; ph.textContent = "En attente";
-  const cap = document.createElement("figcaption");
-  const b = document.createElement("b"); b.textContent = v.picks.length ? v.picks.join(" · ") : "Image " + (i + 1);
-  cap.appendChild(b);
-  f.append(ph, cap);
-  $("grid").appendChild(f);
-  return { fig: f, ph };
+function onImage() {
+  const f = $("img").files && $("img").files[0];
+  imageData = "";
+  $("pick").hidden = true;
+  if (!f) return updateInfo();
+  if (f.size > 15 * 1024 * 1024) {
+    $("pick").hidden = false; $("imgmsg").className = "msg bad"; $("imgmsg").textContent = "Image trop lourde (plus de 15 Mo).";
+    return updateInfo();
+  }
+  const r = new FileReader();
+  r.onload = () => {
+    imageData = r.result;
+    $("thumb").src = imageData;
+    $("imgmsg").className = "msg"; $("imgmsg").textContent = f.name;
+    $("pick").hidden = false;
+    updateInfo();
+  };
+  r.readAsDataURL(f);
 }
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const dur = ms => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + " min " + String(s % 60).padStart(2, "0") + " s"; };
+const isVideo = u => /\.(mp4|webm|mov|m4v)(\?|$)/i.test(u);
 let ticker = null, started = 0;
-/* Chaque seconde : montre que l'app est vivante et où en est chaque image. */
+/* Chaque seconde : montre que l'app est vivante et où en est chaque envoi. */
 function tick() {
   if (!running) return;
   const now = Date.now();
@@ -230,14 +304,47 @@ function tick() {
   }
   const m = $("genmsg");
   m.className = "msg";
-  m.textContent = done + " sur " + jobs.length + " terminée(s) · " + dur(now - started) +
-    (done === 0 ? ". La machine démarre : compte 3 à 10 minutes avant la première image, ensuite ça va vite." : ".");
+  m.textContent = done + " sur " + jobs.length + " terminé(s) · " + dur(now - started) +
+    (done === 0 ? ". La machine démarre : compte 3 à 10 minutes avant le premier résultat (plus pour une vidéo)." : ".");
+}
+
+function card(v, i) {
+  const f = document.createElement("figure");
+  const ph = document.createElement("div"); ph.className = "ph"; ph.textContent = "En attente";
+  const cap = document.createElement("figcaption");
+  const b = document.createElement("b"); b.textContent = v.picks.length ? v.picks.join(" · ") : "Résultat " + (i + 1);
+  cap.appendChild(b);
+  f.append(ph, cap);
+  $("grid").appendChild(f);
+  return { fig: f, ph };
+}
+
+function collectUrls(outputs) {
+  const urls = [];
+  const walk = v => {
+    if (!v) return;
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (typeof v === "object") {
+      if (typeof v.url === "string") urls.push(v.url);
+      else Object.values(v).forEach(walk);
+    }
+  };
+  walk(outputs);
+  return [...new Set(urls)];
 }
 
 async function runJob(job) {
   const dep = $("dep").value;
-  const overrides = { [target.promptNode]: { inputs: { text: job.v.text } } };
-  if (target.seedNode) overrides[target.seedNode] = { inputs: { [target.seedKey]: job.seed } };
+  const overrides = {};
+  const add = (id, k, v) => { (overrides[id] = overrides[id] || { inputs: {} }).inputs[k] = v; };
+  add(target.promptNode, target.promptKey, job.v.text);
+  if (target.wildcard) {
+    add(target.promptNode, "populated_text", "");
+    add(target.promptNode, "mode", "populate");
+    if (target.wildcardSeed) add(target.promptNode, target.wildcardSeed, job.wildSeed);
+  }
+  for (const [id, k] of target.seeds) add(id, k, job.seed);
+  if (target.imageNode && imageData) add(target.imageNode, "image", imageData);
   try {
     const sub = await api("/deployments/" + dep + "/inference", { method: "POST", body: JSON.stringify({ overrides }) });
     job.id = sub.request_id;
@@ -247,20 +354,25 @@ async function runJob(job) {
       if (st.status === "in_queue") job.label = "En file" + (st.queue_position ? " (position " + st.queue_position + ")" : "");
       else if (st.status === "in_progress") job.label = "En cours";
       else break;
-      job.checked = Date.now();
       await sleep(4000);
     }
     const res = await api("/deployments/" + dep + "/requests/" + job.id + "/result");
-    const urls = [];
-    for (const o of Object.values(res.outputs || {})) for (const im of (o.images || [])) if (im.url) urls.push(im.url);
+    const urls = collectUrls(res.outputs);
     if (res.status !== "succeeded" || !urls.length) {
-      throw new Error((res.error && (res.error.message || JSON.stringify(res.error))) || "Pas d'image (" + res.status + ")");
+      throw new Error((res.error && (res.error.message || JSON.stringify(res.error))) || "Aucun résultat (" + res.status + ")");
     }
     job.ph.remove();
-    for (const u of urls) {
+    for (const u of urls.reverse()) {
       const a = document.createElement("a"); a.href = u; a.target = "_blank"; a.rel = "noopener";
-      const img = document.createElement("img"); img.src = u; img.alt = job.v.picks.join(", ") || "Image générée"; img.loading = "lazy";
-      a.appendChild(img); job.fig.prepend(a);
+      if (isVideo(u)) {
+        const vid = document.createElement("video");
+        vid.src = u; vid.controls = true; vid.loop = true; vid.muted = true; vid.playsInline = true; vid.autoplay = true;
+        job.fig.prepend(vid);
+        $("grid").classList.add("video");
+      } else {
+        const img = document.createElement("img"); img.src = u; img.alt = job.v.picks.join(", ") || "Image générée"; img.loading = "lazy";
+        a.appendChild(img); job.fig.prepend(a);
+      }
     }
     job.done = true;
   } catch (e) {
@@ -272,12 +384,17 @@ async function generate() {
   if (running || !target) return;
   const variants = plan();
   const base = parseInt($("seed").value, 10) || 0;
-  store.set("prompt:" + $("dep").value, $("prompt").value);
-  store.set("dep", $("dep").value);
+  const dep = $("dep").value;
+  store.set("prompt:" + dep, $("prompt").value);
+  store.set("count:" + dep, $("count").value);
+  store.set("dep", dep);
   running = true; $("go").disabled = true; $("stop").disabled = false;
-  $("grid").innerHTML = "";
+  $("grid").innerHTML = ""; $("grid").classList.remove("video");
   $("genmsg").className = "msg"; $("genmsg").textContent = "Envoi de " + variants.length + " demande(s)…";
-  jobs = variants.map((v, i) => ({ v, seed: $("fixed").checked ? base : base + i, label: "Envoi", ...card(v, i) }));
+  jobs = variants.map((v, i) => ({
+    v, seed: $("fixed").checked ? base : base + i,
+    wildSeed: Math.floor(Math.random() * 1e12), label: "Envoi", ...card(v, i)
+  }));
   started = Date.now();
   clearInterval(ticker); ticker = setInterval(tick, 1000);
   await Promise.all(jobs.map(runJob));
@@ -285,9 +402,9 @@ async function generate() {
   const bad = jobs.filter(j => j.failed).length;
   if (running) {
     $("genmsg").className = "msg " + (bad ? "bad" : "ok");
-    $("genmsg").textContent = bad ? bad + " image(s) en échec sur " + jobs.length + "." : "Terminé : " + jobs.length + " image(s). Elles restent 7 jours chez RunComfy.";
+    $("genmsg").textContent = bad ? bad + " échec(s) sur " + jobs.length + "." : "Terminé : " + jobs.length + " résultat(s). Ils restent 7 jours chez RunComfy.";
   }
-  running = false; $("go").disabled = false; $("stop").disabled = true;
+  running = false; $("stop").disabled = true; updateInfo();
 }
 
 async function stop() {
@@ -299,12 +416,14 @@ async function stop() {
     j.ph.textContent = "Annulée";
     api("/deployments/" + dep + "/requests/" + j.id + "/cancel", { method: "POST" }).catch(() => {});
   }
+  updateInfo();
 }
 
 $("connect").addEventListener("click", connect);
-$("dep").addEventListener("change", pickDeployment);
+$("dep").addEventListener("change", () => { imageData = ""; $("img").value = ""; $("pick").hidden = true; pickDeployment(); });
 $("prompt").addEventListener("input", updateInfo);
 $("count").addEventListener("input", updateInfo);
+$("img").addEventListener("change", onImage);
 $("go").addEventListener("click", generate);
 $("stop").addEventListener("click", stop);
 $("token").value = store.get("token");
