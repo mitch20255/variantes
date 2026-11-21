@@ -118,10 +118,12 @@ async function api(path, opts = {}) {
 }
 
 /* Analyse le workflow enregistré : où est le prompt, où sont les seeds, y a-t-il une image de départ. */
+const VIDEO_NODE = /video|wan|ltx|hunyuan|mochi|cosmos|animatediff|VHS_|SaveWEBM|AnimatedWEBP|AnimatedPNG/i;
 const isLink = v => Array.isArray(v) && v.length === 2 && typeof v[0] === "string";
 function findTargets(wf) {
   wf = wf || {};
-  const out = { promptNode: null, promptKey: null, text: "", wildcard: false, wildcardSeed: null, seeds: [], imageNode: null };
+  const out = { promptNode: null, promptKey: null, text: "", wildcard: false, wildcardSeed: null, seeds: [], imageNode: null, video: false };
+  out.video = Object.values(wf).some(n => n && VIDEO_NODE.test(n.class_type || ""));
   const findText = (link, depth) => {
     if (!isLink(link) || depth > 8) return null;
     const id = link[0], n = wf[id];
@@ -232,13 +234,14 @@ function pickDeployment() {
     k.className = "msg bad"; k.textContent = "Je ne trouve pas la case du prompt dans ce workflow.";
   } else {
     k.className = "msg";
-    k.textContent = (target.imageNode ? "Workflow avec image de départ (vidéo ou retouche). " : "") +
+    k.textContent = (target.video ? (target.imageNode ? "Vidéo à partir d'une image. " : "Vidéo à partir du texte. ")
+      : (target.imageNode ? "Workflow avec image de départ. " : "")) +
       (target.wildcard ? "Prompt de la boîte verte (listes)." : "Prompt normal.");
   }
   $("promptlabel").firstChild.textContent = target && target.wildcard
     ? "Prompt avec __listes__ (le serveur fait les tirages)" : "Prompt. Mets les choix entre accolades : {petit|moyen|grand}";
   $("s-img").hidden = !(target && target.imageNode);
-  if (target && target.imageNode && !store.get("count:" + d.id)) $("count").value = 1;
+  if (target && (target.imageNode || target.video) && !store.get("count:" + d.id)) $("count").value = 1;
   else if (d && store.get("count:" + d.id)) $("count").value = store.get("count:" + d.id);
   updateInfo();
 }
@@ -325,7 +328,7 @@ function collectUrls(outputs) {
     if (!v) return;
     if (Array.isArray(v)) return v.forEach(walk);
     if (typeof v === "object") {
-      if (typeof v.url === "string") urls.push(v.url);
+      if (typeof v.url === "string") urls.push(isVideo(v.filename || "") && !isVideo(v.url) ? v.url + "#.mp4" : v.url);
       else Object.values(v).forEach(walk);
     }
   };
